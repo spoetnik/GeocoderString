@@ -1,0 +1,128 @@
+<?php namespace ProcessWire;
+
+/**
+ * GeocoderString.module
+ *
+ * Geocode a string or coordinates using the same provider/configuration that
+ * the FieldtypeGeocoder module uses internally.
+ *
+ * Depends on FieldtypeGeocoder and re-uses its adapter/provider/geocoder setup.
+ */
+class GeocoderString extends WireData implements Module {
+
+    public static function getModuleInfo() {
+        return [
+            'title' => 'GeocoderString',
+            'version' => 1,
+            'summary' => 'Geocode an arbitrary string or coordinates using FieldtypeGeocoder configuration',
+            'author' => 'Automated helper',
+            'requires' => ['FieldtypeGeocoder'],
+            'singular' => true,
+            'autoload' => true,
+        ];
+    }
+
+    /** @var FieldtypeGeocoder */
+    protected $fieldtypeGeocoder;
+
+    /** @var \Geocoder\StatefulGeocoder */
+    protected $geocoder;
+
+    /** Initialize and reuse FieldtypeGeocoder's setup */
+    public function init() {
+        $this->fieldtypeGeocoder = $this->modules->get('FieldtypeGeocoder');
+        if (!$this->fieldtypeGeocoder) {
+            throw new WireException("GeocoderString requires the FieldtypeGeocoder module to be installed.");
+        }
+
+        // Load geocoder-php (same as FieldtypeGeocoder does)
+        $this->fieldtypeGeocoder->loadGeocoderPhp();
+
+        // Build adapter / provider / geocoder exactly like FieldtypeGeocoder::update()
+        $adapter = $this->fieldtypeGeocoder->getAdapter();
+        if (!$adapter) {
+            throw new WireException("FieldtypeGeocoder: getAdapter() returned null.");
+        }
+
+        // IMPORTANT: getProvider requires the adapter argument — do NOT call with zero args
+        $provider = $this->fieldtypeGeocoder->getProvider($adapter);
+        if (!$provider) {
+            throw new WireException("FieldtypeGeocoder: provider could not be created. Check FieldtypeGeocoder configuration.");
+        }
+
+        $geocoder = $this->fieldtypeGeocoder->getGeocoder($provider);
+        if (!$geocoder) {
+            throw new WireException("FieldtypeGeocoder: geocoder instance could not be created.");
+        }
+
+        $this->geocoder = $geocoder;
+    }
+
+    /**
+     * Geocode a free-form address string.
+     *
+     * @param string $string Address or place string (e.g. "1017 XE Amsterdam")
+     * @param array $options Optional flags. Supported: ['country' => 'NL']
+     * @return array|null ['lat'=>float, 'lng'=>float, 'formatted_address'=>string] or null on not found/error
+     */
+    public function geocode(string $string, array $options = []) {
+        if (!$this->geocoder) return null;
+
+        try {
+            $queryText = $string;
+            if (!empty($options['country'])) {
+                // keep this simple — FieldtypeGeocoder itself uses a GeocodeQuery, no special country param,
+                // so appending country is pragmatic. If you need strict country filtering, we could implement it.
+                $queryText .= ', ' . $options['country'];
+            }
+
+            $q = \Geocoder\Query\GeocodeQuery::create($queryText);
+            // pass through FieldtypeGeocoder's filterQuery (keeps parity with module behaviour)
+            $q = $this->fieldtypeGeocoder->filterQuery($q);
+
+            $collection = $this->geocoder->geocodeQuery($q);
+            if ($collection->isEmpty()) return null;
+
+            $location = $collection->first();
+            $coords = $location->getCoordinates();
+
+            return [
+                'lat' => $coords ? $coords->getLatitude() : null,
+                'lng' => $coords ? $coords->getLongitude() : null,
+                // reuse the FieldtypeGeocoder's formatting helper to keep formatting consistent
+                'formatted_address' => $this->fieldtypeGeocoder->formatAddress($location)
+            ];
+        } catch (\Throwable $e) {
+            $this->wire('log')->save("GeocoderString::geocode error: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Reverse-geocode coordinates to a formatted address.
+     *
+     * @param float $lat
+     * @param float $lng
+     * @return array|null ['formatted_address' => string] or null
+     */
+    public function reverseGeocode(float $lat, float $lng) {
+        if (!$this->geocoder) return null;
+
+        try {
+            $rq = \Geocoder\Query\ReverseQuery::fromCoordinates($lat, $lng);
+            $rq = $this->fieldtypeGeocoder->filterQuery($rq);
+
+            $collection = $this->geocoder->reverseQuery($rq);
+            if ($collection->isEmpty()) return null;
+
+            $location = $collection->first();
+
+            return [
+                'formatted_address' => $this->fieldtypeGeocoder->formatAddress($location)
+            ];
+        } catch (\Throwable $e) {
+            $this->wire('log')->save("GeocoderString::reverseGeocode error: " . $e->getMessage());
+            return null;
+        }
+    }
+}
