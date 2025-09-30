@@ -71,14 +71,14 @@ class GeocoderString extends WireData implements Module {
         try {
             $queryText = $string;
             if (!empty($options['country'])) {
-                // keep this simple — FieldtypeGeocoder itself uses a GeocodeQuery, no special country param,
-                // so appending country is pragmatic. If you need strict country filtering, we could implement it.
                 $queryText .= ', ' . $options['country'];
             }
 
+            // Create query directly without filterQuery() which requires field context
             $q = \Geocoder\Query\GeocodeQuery::create($queryText);
-            // pass through FieldtypeGeocoder's filterQuery (keeps parity with module behaviour)
-            $q = $this->fieldtypeGeocoder->filterQuery($q);
+            
+            // NOTE: We skip filterQuery() because it may access field-specific database tables
+            // If you need to apply filterQuery hooks, you'll need to create an actual field instance
 
             $collection = $this->geocoder->geocodeQuery($q);
             if ($collection->isEmpty()) return null;
@@ -89,8 +89,7 @@ class GeocoderString extends WireData implements Module {
             return [
                 'lat' => $coords ? $coords->getLatitude() : null,
                 'lng' => $coords ? $coords->getLongitude() : null,
-                // reuse the FieldtypeGeocoder's formatting helper to keep formatting consistent
-                'formatted_address' => $this->fieldtypeGeocoder->formatAddress($location)
+                'formatted_address' => $this->formatLocationAddress($location)
             ];
         } catch (\Throwable $e) {
             $this->wire('log')->save("GeocoderString::geocode error: " . $e->getMessage());
@@ -110,7 +109,8 @@ class GeocoderString extends WireData implements Module {
 
         try {
             $rq = \Geocoder\Query\ReverseQuery::fromCoordinates($lat, $lng);
-            $rq = $this->fieldtypeGeocoder->filterQuery($rq);
+            
+            // NOTE: Skip filterQuery() to avoid field context dependency
 
             $collection = $this->geocoder->reverseQuery($rq);
             if ($collection->isEmpty()) return null;
@@ -118,11 +118,32 @@ class GeocoderString extends WireData implements Module {
             $location = $collection->first();
 
             return [
-                'formatted_address' => $this->fieldtypeGeocoder->formatAddress($location)
+                'formatted_address' => $this->formatLocationAddress($location)
             ];
         } catch (\Throwable $e) {
             $this->wire('log')->save("GeocoderString::reverseGeocode error: " . $e->getMessage());
             return null;
         }
+    }
+
+    /**
+     * Format a Location object into a human-readable address string.
+     * This avoids calling FieldtypeGeocoder::formatAddress() which requires database access.
+     *
+     * @param \Geocoder\Model\Address $location
+     * @return string
+     */
+    protected function formatLocationAddress($location) {
+        // Build address from Location object components
+        $parts = array_filter([
+            $location->getStreetNumber(),
+            $location->getStreetName(),
+            $location->getPostalCode(),
+            $location->getLocality(),
+            $location->getSubLocality(),
+            $location->getCountry() ? $location->getCountry()->getName() : null,
+        ]);
+
+        return implode(', ', $parts) ?: 'Unknown location';
     }
 }
